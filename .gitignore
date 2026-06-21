@@ -1,0 +1,23 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+
+# Secrets & local state — NEVER commit
+config.json
+*.log
+
+# Recorded audio / transcripts (if any land in the repo dir)
+recordings/
+*.mp3
+*.m4a
+*.wav
+*.aiff
+*.aac
+*.flac
+
+# Downloaded local models
+models/

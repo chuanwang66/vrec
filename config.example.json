@@ -1,0 +1,15 @@
+{
+  "engine": "cloud",
+  "language": null,
+  "api_key": "",
+  "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  "model": "qwen3-asr-flash",
+  "enable_itn": true,
+  "local_model": "small",
+  "audio_device": "0",
+  "sample_rate": 16000,
+  "channels": 1,
+  "bitrate": "48k",
+  "recordings_dir": "~/.vrec/recordings",
+  "chunk_seconds": 240
+}

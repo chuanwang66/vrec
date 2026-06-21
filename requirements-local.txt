@@ -1,0 +1,5 @@
+# Optional: local offline speech-recognition engine.
+# Pulled in automatically the first time you switch to the "本地 / Local" engine,
+# or eagerly with:  ./start.sh --with-local
+# Models download on first use into ~/.vrec/models
+faster-whisper>=1.0.0

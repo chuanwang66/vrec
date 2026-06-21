@@ -1,0 +1,5 @@
+# Core deps for the CLI + menu-bar app (cloud engine).
+# Installed automatically by ./start.sh into a local .venv
+requests>=2.31,<3
+rumps>=0.4.0
+pyobjc-framework-Cocoa>=10.0
