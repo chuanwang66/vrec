@@ -80,6 +80,8 @@ DEFAULT_CONFIG = {
     "recordings_dir": str(APP_DIR / "recordings"),
     # --- transcription chunking (API limit: 10 MB / 5 min per request) ---
     "chunk_seconds": 240,    # split long audio into <=4 min pieces
+    # --- menu-bar app ---
+    "logo_path": "",         # custom menu-bar icon path (set via the app)
 }
 
 # Per-request safety ceilings for the sync endpoint.
@@ -214,6 +216,28 @@ def ffprobe_duration(path: str) -> float:
         return float(out)
     except ValueError:
         return 0.0
+
+
+def make_icon(src: str, dst: str, size: int = 44) -> None:
+    """Center-crop + resize an image into a small square PNG for the menu bar."""
+    src = os.path.expanduser(src)
+    info = subprocess.run(["sips", "-g", "pixelWidth", "-g", "pixelHeight", src],
+                          capture_output=True, text=True).stdout
+    w = h = 0
+    for line in info.splitlines():
+        if "pixelWidth:" in line:
+            w = int(line.split(":")[1])
+        elif "pixelHeight:" in line:
+            h = int(line.split(":")[1])
+    Path(dst).parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["sips", "-s", "format", "png", src, "--out", dst],
+                   check=True, capture_output=True)
+    if w and h:  # scale by the shorter side, then center-crop to a square
+        flag = "--resampleWidth" if w <= h else "--resampleHeight"
+        subprocess.run(["sips", flag, str(size), dst, "--out", dst],
+                       check=True, capture_output=True)
+        subprocess.run(["sips", "-c", str(size), str(size), dst, "--out", dst],
+                       check=True, capture_output=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -575,28 +599,37 @@ def load_local_model(name: str, quiet: bool = True):
     return model
 
 
-def _transcribe_local(cfg: dict, src: Path, quiet: bool) -> str:
+def _transcribe_local(cfg: dict, src: Path, quiet: bool, progress=None) -> str:
     name = cfg.get("local_model") or "small"
     model = load_local_model(name, quiet)
     log("transcribing locally (offline)…", quiet)
-    segments, _info = model.transcribe(
+    segments, info = model.transcribe(
         str(src), language=cfg.get("language") or None, beam_size=5,
     )
-    return "".join(seg.text for seg in segments).strip()
+    total = getattr(info, "duration", 0) or 0
+    parts = []
+    for seg in segments:
+        parts.append(seg.text)
+        if progress and total:
+            frac = min(seg.end / total, 1.0)
+            progress(frac, f"{int(frac * 100)}%")
+    if progress:
+        progress(1.0, "100%")
+    return "".join(parts).strip()
 
 
 def transcribe_file(cfg: dict, audio_path: str, quiet: bool = False,
-                    engine: str | None = None) -> str:
+                    engine: str | None = None, progress=None) -> str:
     src = Path(audio_path).expanduser()
     if not src.exists():
         raise FileNotFoundError(f"file not found: {src}")
     engine = (engine or cfg.get("engine") or "cloud").lower()
     if engine == "local":
-        return _transcribe_local(cfg, src, quiet)
-    return _transcribe_cloud(cfg, src, quiet)
+        return _transcribe_local(cfg, src, quiet, progress)
+    return _transcribe_cloud(cfg, src, quiet, progress)
 
 
-def _transcribe_cloud(cfg: dict, src: Path, quiet: bool = False) -> str:
+def _transcribe_cloud(cfg: dict, src: Path, quiet: bool = False, progress=None) -> str:
     which_or_die("ffmpeg")
     with tempfile.TemporaryDirectory(prefix="vrec_") as tmp:
         normalized = os.path.join(tmp, "norm.mp3")
@@ -611,14 +644,20 @@ def _transcribe_cloud(cfg: dict, src: Path, quiet: bool = False) -> str:
 
         if dur <= MAX_SINGLE_SECONDS and size <= MAX_SINGLE_BYTES:
             log(f"transcribing ({fmt_secs(dur)}) …", quiet)
-            return _api_transcribe(cfg, normalized).strip()
+            text = _api_transcribe(cfg, normalized).strip()
+            if progress:
+                progress(1.0, "")
+            return text
 
         chunks = _segment_audio(normalized, tmp, int(cfg["chunk_seconds"]))
-        log(f"long audio ({fmt_secs(dur)}): split into {len(chunks)} chunks", quiet)
+        n = len(chunks)
+        log(f"long audio ({fmt_secs(dur)}): split into {n} chunks", quiet)
         parts = []
         for i, chunk in enumerate(chunks, 1):
-            log(f"  chunk {i}/{len(chunks)} …", quiet)
+            log(f"  chunk {i}/{n} …", quiet)
             parts.append(_api_transcribe(cfg, str(chunk)).strip())
+            if progress:
+                progress(i / n, f"{i}/{n}")
         return "\n".join(p for p in parts if p)
 
 

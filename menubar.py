@@ -56,6 +56,23 @@ def pick_audio_file():
     return None
 
 
+def pick_image_file():
+    """Native open-file dialog for an image; return a path or None."""
+    try:
+        from AppKit import NSOpenPanel, NSApplication
+        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+        panel = NSOpenPanel.openPanel()
+        panel.setCanChooseFiles_(True)
+        panel.setCanChooseDirectories_(False)
+        panel.setAllowsMultipleSelection_(False)
+        panel.setAllowedFileTypes_(["png", "jpg", "jpeg", "heic", "gif", "tiff", "bmp"])
+        if panel.runModal() == 1 and panel.URLs():
+            return panel.URLs()[0].path()
+    except Exception as e:  # noqa: BLE001
+        notify("vrec", "无法打开文件选择器", str(e)[:120])
+    return None
+
+
 class VrecApp(rumps.App):
     def __init__(self):
         super().__init__(IDLE_ICON, quit_button=None)
@@ -64,7 +81,9 @@ class VrecApp(rumps.App):
         self.record_started = None
         self.scheduled = None         # (start_datetime, duration_seconds | None)
         self.transcribing = False
+        self.tx_detail = ""           # transcription progress text (e.g. "2/5", "45%")
         self.auto_transcribe = True
+        self.has_logo = False
 
         # --- build menu ---
         self.status_item = rumps.MenuItem("⚪ 待机")   # non-clickable live status line
@@ -109,6 +128,9 @@ class VrecApp(rumps.App):
         settings.add(rumps.MenuItem("设置 Base URL…", callback=self.set_base_url))
         settings.add(rumps.MenuItem("设置云端模型名…", callback=self.set_model_name))
         settings.add(rumps.separator)
+        settings.add(rumps.MenuItem("设置菜单栏图标…", callback=self.set_logo))
+        settings.add(rumps.MenuItem("恢复默认图标", callback=self.clear_logo))
+        settings.add(rumps.separator)
         settings.add(rumps.MenuItem("打开配置文件", callback=lambda _: self._open(vrec.CONFIG_PATH)))
         settings.add(rumps.MenuItem("查看日志", callback=lambda _: self._open(vrec.LOG_PATH)))
 
@@ -138,6 +160,7 @@ class VrecApp(rumps.App):
         self._refresh_model_state()
         self._refresh_mics()
         self.item_cancel_sched.set_callback(None)  # disabled until scheduled
+        self._apply_logo_from_config()             # custom menu-bar icon, if set
 
         self.timer = rumps.Timer(self.tick, 1)
         self.timer.start()
@@ -213,11 +236,15 @@ class VrecApp(rumps.App):
             notify("vrec", "请稍候", "正在转译上一段音频")
             return
 
+        def on_progress(frac, detail):
+            self.tx_detail = detail or ""
+
         def work():
             self.transcribing = True
+            self.tx_detail = ""
             try:
                 cfg = self.cfg()
-                text = vrec.transcribe_file(cfg, path, quiet=True)
+                text = vrec.transcribe_file(cfg, path, quiet=True, progress=on_progress)
                 out = Path(path).with_suffix(".txt")
                 out.write_text(text + "\n", encoding="utf-8")
                 notify("vrec", "转译完成 ✓", (text[:120] or "（识别为空）"))
@@ -226,6 +253,7 @@ class VrecApp(rumps.App):
                 notify("vrec", "转译失败", str(e)[:160])
             finally:
                 self.transcribing = False
+                self.tx_detail = ""
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -394,6 +422,49 @@ class VrecApp(rumps.App):
         self._open(d)
 
     # ------------------------------------------------------------------ #
+    # custom menu-bar logo
+    # ------------------------------------------------------------------ #
+    def _apply_logo(self, path):
+        try:
+            try:
+                self.template = False     # show the image in color, not as a mask
+            except Exception:             # noqa: BLE001
+                pass
+            self.icon = path
+            self.has_logo = True
+        except Exception as e:            # noqa: BLE001
+            notify("vrec", "图标设置失败", str(e)[:120])
+
+    def _apply_logo_from_config(self):
+        lp = os.path.expanduser(self.cfg().get("logo_path") or "")
+        if lp and os.path.exists(lp):
+            self._apply_logo(lp)
+
+    def set_logo(self, _):
+        src = pick_image_file()
+        if not src:
+            return
+        dst = str(vrec.APP_DIR / "logo.png")
+        try:
+            vrec.make_icon(src, dst, size=44)
+        except Exception as e:            # noqa: BLE001
+            notify("vrec", "图标处理失败", str(e)[:140])
+            return
+        cfg = self.cfg(); cfg["logo_path"] = dst; vrec.save_config(cfg)
+        self._apply_logo(dst)
+        notify("vrec", "已更新菜单栏图标 ✓", "")
+
+    def clear_logo(self, _):
+        cfg = self.cfg(); cfg["logo_path"] = ""; vrec.save_config(cfg)
+        self.has_logo = False
+        try:
+            self.icon = None
+        except Exception:                 # noqa: BLE001
+            pass
+        self.title = IDLE_ICON
+        notify("vrec", "已恢复默认图标", "")
+
+    # ------------------------------------------------------------------ #
     # main loop tick
     # ------------------------------------------------------------------ #
     def tick(self, _):
@@ -410,12 +481,13 @@ class VrecApp(rumps.App):
             name = os.path.basename(self.current_file or "")
             self.status_item.title = f"🔴 录音中 · {clock} · {name}"
         elif self.transcribing:
-            self.title = BUSY_ICON
+            d = self.tx_detail
+            self.title = f"{BUSY_ICON} {d}".rstrip()
             self.item_record.title = "● 开始录音"
-            self.status_item.title = "💬 正在转译…"
+            self.status_item.title = f"💬 转译中 {d}".rstrip() if d else "💬 正在转译…"
         elif self.scheduled:
             start_dt, dur = self.scheduled
-            self.title = f"{IDLE_ICON} ⏰"
+            self.title = "⏰" if self.has_logo else f"{IDLE_ICON} ⏰"
             self.item_record.title = "● 开始录音"
             tail = f"，录 {vrec.fmt_secs(dur)}" if dur else "（手动停止）"
             self.status_item.title = f"⏰ 已预约 {start_dt:%m-%d %H:%M}{tail}"
@@ -424,7 +496,7 @@ class VrecApp(rumps.App):
                 self.item_cancel_sched.set_callback(None)
                 self.start_recording(duration=dur)
         else:
-            self.title = IDLE_ICON
+            self.title = "" if self.has_logo else IDLE_ICON
             self.item_record.title = "● 开始录音"
             self.status_item.title = "⚪ 待机"
 
